@@ -1,0 +1,32 @@
+source:
+  type: airflow
+  serviceName: airflow-platform
+  serviceConnection:
+    config:
+      type: Airflow
+      hostPort: "${AIRFLOW}"
+      numberOfStatus: 10
+      connection:
+        type: Postgres
+        username: ${POSTGRES_USER}
+        authType:
+          password: ${POSTGRES_PASSWORD}
+        hostPort: postgres:5432
+        database: airflow
+  sourceConfig:
+    config:
+      type: PipelineMetadata
+      includeLineage: true
+      includeTags: true
+
+sink:
+  type: metadata-rest
+  config: {}
+
+workflowConfig:
+  loggerLevel: INFO
+  openMetadataServerConfig:
+    hostPort: "${OPENMETADATA}/api"
+    authProvider: openmetadata
+    securityConfig:
+      jwtToken: "${OM_INGESTION_JWT}"

@@ -1,0 +1,25 @@
+source:
+  type: pinot
+  serviceName: pinot-platform
+  serviceConnection:
+    config:
+      type: Pinot
+      hostPort: ${PINOT_BROKER_HOST}:${PINOT_BROKER_PORT:-8099}
+      pinotControllerHost: "http://${PINOT_CONTROLLER_HOST}:${PINOT_CONTROLLER_PORT:-9000}"
+  sourceConfig:
+    config:
+      type: DatabaseMetadata
+      markDeletedTables: true
+      includeTables: true
+
+sink:
+  type: metadata-rest
+  config: {}
+
+workflowConfig:
+  loggerLevel: INFO
+  openMetadataServerConfig:
+    hostPort: "${OPENMETADATA}/api"
+    authProvider: openmetadata
+    securityConfig:
+      jwtToken: "${OM_INGESTION_JWT}"

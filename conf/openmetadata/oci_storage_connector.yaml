@@ -1,0 +1,26 @@
+source:
+  type: s3
+  serviceName: oci-object-storage
+  serviceConnection:
+    config:
+      type: S3
+      awsConfig:
+        awsAccessKeyId: ${OCI_ACCESS_KEY_ID}
+        awsSecretAccessKey: ${OCI_SECRET_ACCESS_KEY}
+        awsRegion: ${OCI_REGION}
+        endPointURL: ${OCI_S3_ENDPOINT}
+  sourceConfig:
+    config:
+      type: StorageMetadata
+
+sink:
+  type: metadata-rest
+  config: {}
+
+workflowConfig:
+  loggerLevel: INFO
+  openMetadataServerConfig:
+    hostPort: "${OPENMETADATA}/api"
+    authProvider: openmetadata
+    securityConfig:
+      jwtToken: "${OM_INGESTION_JWT}"

@@ -1,0 +1,35 @@
+# Configuration for iceberg-alembic migration framework
+# This file loads settings in priority order:
+# 1. Explicit config file (this file)
+# 2. ICEBERG_ALEMBIC_CONFIG env var
+# 3. Environment variables (ICEBERG_ALEMBIC_*)
+#
+# For Docker Compose integration, use the environment variables instead.
+# See DEVELOPMENT.md for complete setup instructions.
+
+[catalog]
+# REST catalog pointing to iceberg-rest service
+name = "datawarehouse-local"
+type = "rest"
+uri = "http://localhost:8181"  # Host-facing endpoint; use http://iceberg-rest:8181 inside Docker
+warehouse = "s3://warehouse/"
+namespace = "dw"
+
+[catalog.properties]
+# S3/MinIO endpoint configuration - update these from .env
+s3_endpoint = "${OCI_S3_ENDPOINT}"
+s3_region = "${OCI_REGION}"
+s3_access_key_id = "${OCI_ACCESS_KEY_ID}"
+s3_secret_access_key = "${OCI_SECRET_ACCESS_KEY}"
+s3_path_style_access = "true"
+s3_checksum_enabled = "false"
+s3_chunked_encoding_enabled = "false"
+
+[execution]
+# Metadata about the migrations
+applied_by = "datawarehouse-alembic"
+# Trino for SQL operations if needed - use http://trino:8080 inside Docker
+trino_url = "https://localhost:8443"
+spark_url = "local://spark"
+# Path to store local migration state
+state_path = ".iceberg-alembic-state.json"

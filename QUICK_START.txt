@@ -1,0 +1,142 @@
+================================================================================
+FORECAST PIPELINE - QUICK START
+================================================================================
+
+THREE COMMANDS TO RUN THE ENTIRE PIPELINE:
+
+1. START INFRASTRUCTURE:
+   $ ./start.sh
+
+2. RUN PIPELINE (upload CSV + trigger DAG + verify files):
+   $ ./start_forecast_pipeline.sh
+
+3. MONITOR LOGS (in another terminal):
+   $ ./watch_containers.sh airflow
+
+================================================================================
+WHAT HAPPENS:
+
+Step 1 (./start.sh):
+  ✓ Starts Iceberg REST, Trino, Airflow, Spark, S3 containers
+  ✓ Generates Trino catalogs
+  ✓ Waits for all services to be healthy
+
+Step 2 (./start_forecast_pipeline.sh):
+  ✓ Verifies CSV file exists (warehouse_forecast_1000_rows.csv)
+  ✓ Uploads CSV to S3: s3://landing_test/tenant/EE/Bronze/Forecast/
+  ✓ Triggers forecast_ingestion DAG
+  ✓ Monitors execution (100+ seconds)
+  ✓ Verifies file movement:
+    - original/2026-07-03/ (backup before validation)
+    - processed/2026-07-03/ (backup after success)
+
+Step 3 (./watch_containers.sh):
+  ✓ Shows live logs from containers
+  ✓ Watch validation, loading, and errors in real-time
+
+================================================================================
+EXPECTED FILE STRUCTURE AFTER SUCCESS:
+
+s3://landing_test/tenant/EE/Bronze/Forecast/
+├── warehouse_forecast_1000_rows.csv ◄── ORIGINAL (always stays)
+├── original/2026-07-03/
+│   └── warehouse_forecast_1000_rows.csv ◄── Backup BEFORE validation
+└── processed/2026-07-03/
+    └── warehouse_forecast_1000_rows.csv ◄── Backup AFTER processing
+
+DATA LOADED:
+├── bronze.iot_forecast_raw (1000 rows)
+├── silver.dim_* (dimension tables)
+├── silver.fact_iot_forecast (facts with dimension IDs)
+└── gold.* (daily and monthly aggregations)
+
+================================================================================
+MONITOR FILES IN S3:
+
+# List all files in Forecast directory
+docker compose exec airflow python3 << 'EOF'
+import boto3, os
+s3 = boto3.client('s3', endpoint_url=os.getenv("OCI_S3_ENDPOINT"),
+    aws_access_key_id=os.getenv("OCI_ACCESS_KEY_ID"),
+    aws_secret_access_key=os.getenv("OCI_SECRET_ACCESS_KEY"))
+resp = s3.list_objects_v2(Bucket='landing_test',
+    Prefix='tenant/EE/Bronze/Forecast')
+for obj in resp.get('Contents', []):
+    print(obj['Key'])
+EOF
+
+================================================================================
+VERIFY DATA IN TABLES:
+
+# Check bronze table
+docker compose exec airflow airflow tasks test forecast_ingestion validate_results
+
+# Query via Trino
+docker compose exec trino trino
+> SELECT COUNT(*) FROM iceberg.ee.bronze.iot_forecast_raw;
+> SELECT COUNT(*) FROM iceberg.ee.silver.fact_iot_forecast;
+
+================================================================================
+TROUBLESHOOTING:
+
+If pipeline fails:
+  1. Check logs: ./watch_containers.sh airflow
+  2. Check S3 upload: s3://landing_test/tenant/EE/Bronze/Forecast/
+  3. Check DAG: http://localhost:8080/dags/forecast_ingestion
+  4. Check error messages for schema/validation issues
+
+If containers won't start:
+  1. Restart: docker compose down && ./start.sh
+  2. Clean restart: docker compose down -v && ./start.sh
+  3. Check resources: docker stats
+
+If file movement fails:
+  1. Verify S3 credentials in .env
+  2. Check bucket exists: landing_test
+  3. Verify path: tenant/EE/Bronze/Forecast/
+
+================================================================================
+FILES CREATED:
+
+✓ warehouse_forecast_1000_rows.csv - Test data (1000 rows, all required columns)
+✓ start_forecast_pipeline.sh - Automated pipeline execution
+✓ watch_containers.sh - Real-time log monitoring
+✓ PIPELINE_EXECUTION_GUIDE.md - Detailed documentation
+✓ QUICK_START.txt - This file
+
+================================================================================
+EXPECTED TIMELINE:
+
+[0:00]   Start infrastructure with ./start.sh
+[1:30]   Infrastructure ready, all containers healthy
+[1:35]   Run ./start_forecast_pipeline.sh
+[1:40]   CSV uploaded to S3
+[1:45]   DAG triggered, tasks starting
+[1:50]   File discovery and archiving
+[2:00]   Schema validation
+[2:15]   Bronze loading (1000 rows)
+[2:45]   Silver dimension loading
+[3:15]   Silver fact table loading
+[3:45]   Gold aggregations
+[4:15]   Results validation and file archiving
+[4:25]   ✓ COMPLETE
+
+Total time: ~3 minutes
+
+================================================================================
+NEXT STEPS AFTER SUCCESS:
+
+1. Query the data in Trino:
+   docker compose exec trino trino
+   SELECT * FROM iceberg.ee.silver.fact_iot_forecast LIMIT 10;
+
+2. Check aggregations in Gold:
+   SELECT * FROM iceberg.ee.gold.forecast_daily LIMIT 10;
+
+3. Verify file movement:
+   docker compose exec airflow python3 (see "MONITOR FILES IN S3" section)
+
+4. Review DAG execution:
+   http://localhost:8080/dags/forecast_ingestion
+
+================================================================================

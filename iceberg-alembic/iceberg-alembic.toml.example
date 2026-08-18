@@ -1,0 +1,21 @@
+[catalog]
+name = "datawarehouse-local"
+type = "rest"
+uri = "http://localhost:8181"
+warehouse = "s3://warehouse/"
+namespace = "dw"
+
+[catalog.properties]
+s3_endpoint = "https://<object-storage-endpoint>"
+s3_region = "uk-london-1"
+s3_path_style_access = "true"
+s3_checksum_enabled = "false"
+s3_chunked_encoding_enabled = "false"
+s3_access_key_id = "<storage-access-key>"
+s3_secret_access_key = "<storage-secret-key>"
+
+[execution]
+applied_by = "datawarehouse-local"
+trino_url = "https://localhost:8443"
+spark_url = "local://spark"
+state_path = ".iceberg-alembic-state.json"

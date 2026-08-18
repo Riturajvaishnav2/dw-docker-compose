@@ -1,0 +1,568 @@
+services:
+  postgres:
+    image: postgres:15
+    env_file: .env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./sql/bootstrap/postgres-init.sql:/docker-entrypoint-initdb.d/10-init-databases.sql:ro
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d postgres" ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - iceberg-net
+
+  postgres-bootstrap:
+    image: postgres:15
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      AIRFLOW_DB: ${AIRFLOW_DB:-airflow}
+      SUPERSET_DB: ${SUPERSET_DB:-superset}
+    entrypoint: ["/bin/bash", "/opt/scripts/bootstrap_postgres_databases.sh"]
+    volumes:
+      - ./scripts/bootstrap_postgres_databases.sh:/opt/scripts/bootstrap_postgres_databases.sh:ro
+    networks:
+      - iceberg-net
+
+  iceberg-rest:
+    image: tabulario/iceberg-rest:0.6.0
+    env_file: .env
+    depends_on:
+      postgres-bootstrap:
+        condition: service_completed_successfully
+    environment:
+      AWS_ACCESS_KEY_ID: ${OCI_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${OCI_SECRET_ACCESS_KEY}
+      AWS_REGION: ${OCI_REGION:-us-east-1}
+      CATALOG_WAREHOUSE: s3://${CATALOG_WAREHOUSE}
+      CATALOG_CATALOG__IMPL: org.apache.iceberg.jdbc.JdbcCatalog
+      CATALOG_URI: jdbc:postgresql://postgres:5432/iceberg_catalog
+      CATALOG_JDBC_USER: ${POSTGRES_USER}
+      CATALOG_JDBC_PASSWORD: ${POSTGRES_PASSWORD}
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_S3_ENDPOINT: ${OCI_S3_ENDPOINT}
+      CATALOG_S3_PATH__STYLE__ACCESS: "true"
+      CATALOG_S3_CHUNKED__ENCODING__ENABLED: "false"
+      CATALOG_S3_CHECKSUM__ENABLED: "false"
+      CATALOG_REST_CORS__ORIGINS: "*"
+      CATALOG_REST_CORS__ALLOWED__METHODS: "GET,POST,PUT,DELETE,HEAD,OPTIONS"
+      CATALOG_REST_CORS__ALLOWED__HEADERS: "Content-Type,Authorization,X-Requested-With,ngrok-skip-browser-warning"
+      CATALOG_REST_NESTED_NAMESPACE_ENABLED: "false"
+      # Connection pool settings - optimized for remote S3
+      CATALOG_JDBC_POOL_MIN-IDLE: "5"
+      CATALOG_JDBC_POOL_MAX-IDLE: "15"
+      CATALOG_JDBC_POOL_MAX-SIZE: "25"
+      CATALOG_JDBC_POOL_CONNECTION-TIMEOUT: "10000"
+      CATALOG_JDBC_POOL_IDLE-TIMEOUT: "300000"
+      CATALOG_JDBC_POOL_MAX-LIFETIME: "540000"
+      CATALOG_JDBC_POOL_KEEPALIVE-TIME: "60000"
+      CATALOG_JDBC_POOL_VALIDATION-TIMEOUT: "3000"
+      JAVA_TOOL_OPTIONS: >-
+        -Dsoftware.amazon.awssdk.sdk.requestChecksumCalculation=WHEN_REQUIRED
+        -Dsoftware.amazon.awssdk.sdk.responseChecksumCalculation=WHEN_REQUIRED
+        -Dhttp.keepAlive=true
+        -Dhttp.maxConnections=100
+        -Dsoftware.amazon.awssdk.http.connection.read.timeout=30000
+        -Dsoftware.amazon.awssdk.http.connection.write.timeout=30000
+    ports:
+      - "8181:8181"
+    networks:
+      - iceberg-net
+
+  iceberg-alembic:
+    build:
+      context: .
+      dockerfile: ./docker/iceberg-alembic/Dockerfile
+    env_file: .env
+    depends_on:
+      postgres-bootstrap:
+        condition: service_completed_successfully
+      iceberg-rest:
+        condition: service_started
+    environment:
+      ICEBERG_ALEMBIC_CATALOG_NAME: ${ICEBERG_NAMESPACE}
+      ICEBERG_ALEMBIC_CATALOG_TYPE: rest
+      ICEBERG_ALEMBIC_CATALOG_URI: http://iceberg-rest:8181
+      ICEBERG_ALEMBIC_WAREHOUSE: s3://${CATALOG_WAREHOUSE}/${ICEBERG_NAMESPACE}
+      ICEBERG_NAMESPACE: ${ICEBERG_NAMESPACE}
+      ICEBERG_ALEMBIC_APPLIED_BY: ${ICEBERG_ALEMBIC_APPLIED_BY:-docker-compose}
+      ICEBERG_ALEMBIC_STATE_PATH: /migrations/.iceberg-alembic-state.json
+      ICEBERG_ALEMBIC_TRINO_URL: http://trino:8080
+      ICEBERG_ALEMBIC_SPARK_URL: sc://spark:15002
+      ICEBERG_ALEMBIC_PROPERTY_S3_ENDPOINT: ${OCI_S3_ENDPOINT}
+      ICEBERG_ALEMBIC_PROPERTY_S3_REGION: ${OCI_REGION}
+      ICEBERG_ALEMBIC_PROPERTY_S3_ACCESS_KEY_ID: ${OCI_ACCESS_KEY_ID}
+      ICEBERG_ALEMBIC_PROPERTY_S3_SECRET_ACCESS_KEY: ${OCI_SECRET_ACCESS_KEY}
+      ICEBERG_ALEMBIC_PROPERTY_S3_PATH_STYLE_ACCESS: "true"
+      ICEBERG_ALEMBIC_PROPERTY_S3_CHECKSUM_ENABLED: "false"
+      ICEBERG_ALEMBIC_PROPERTY_S3_CHUNKED_ENCODING_ENABLED: "false"
+      # Set to "true" to fix migrations on startup, "false" to skip
+      MIGRATION_FIX: "true"
+    volumes:
+      - ./iceberg-alembic/migrations:/migrations/migrations
+      - ./scripts:/opt/project/scripts
+      - ./conf/trino/catalog:/opt/project/conf/trino/catalog
+    healthcheck:
+      test: ["CMD", "python", "/verify_migrations.py"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    networks:
+      - iceberg-net
+
+  spark:
+    build:
+      context: ./docker/spark
+    env_file: .env
+    depends_on:
+      iceberg-rest:
+        condition: service_started
+      iceberg-alembic:
+        condition: service_healthy
+    environment:
+      AWS_ACCESS_KEY_ID: ${OCI_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${OCI_SECRET_ACCESS_KEY}
+      AWS_REGION: ${OCI_REGION:-us-east-1}
+      OCI_S3_ENDPOINT: ${OCI_S3_ENDPOINT}
+      USE_OCI_STORAGE: ${USE_OCI_STORAGE:-false}
+      ICEBERG_CATALOG_URI: http://iceberg-rest:8181
+      CATALOG_WAREHOUSE: s3://${CATALOG_WAREHOUSE}
+    command: [ "/bin/bash", "-lc", "python -c 'from pyspark.sql import SparkSession; spark = SparkSession.builder.appName(\"SparkUI\").master(\"local[*]\").getOrCreate(); import time; time.sleep(999999)'" ]
+    volumes:
+      - ./jobs:/opt/platform/jobs
+      - ./data:/opt/platform/data
+      - ./conf/spark:/opt/platform/conf/spark
+    ports:
+      - "4040:4040"
+    networks:
+      - iceberg-net
+
+  trino:
+    image: trinodb/trino:480
+    env_file: .env
+    depends_on:
+      iceberg-rest:
+        condition: service_started
+      iceberg-alembic:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/ui/api.html"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 6g
+        reservations:
+          cpus: '0.5'
+          memory: 2g
+    environment:
+      AWS_ACCESS_KEY_ID: ${OCI_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${OCI_SECRET_ACCESS_KEY}
+      OCI_S3_ENDPOINT: ${OCI_S3_ENDPOINT}
+      OCI_REGION: ${OCI_REGION:-us-east-1}
+      KEYCLOAK_REALM_URL: ${KEYCLOAK_REALM_URL}
+      OAUTH_CLIENT_ID: ${OAUTH_CLIENT_ID}
+      OAUTH_CLIENT_SECRET: ${OAUTH_CLIENT_SECRET}
+      CLICKHOUSE_HOST: ${CLICKHOUSE_HOST}
+      CLICKHOUSE_PORT: ${CLICKHOUSE_PORT}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      ICEBERG_CATALOG_URI: http://iceberg-rest:8181
+    extra_hosts:
+      - "${SSO_HOST}:${SSO_HOST_IP}"
+    volumes:
+      - ./conf/trino/catalog:/etc/trino/catalog
+      - ./conf/trino/config.properties:/etc/trino/config.properties
+      - ./conf/trino/password.db:/etc/trino/password.db
+      - ./conf/trino/password-authenticator.properties:/etc/trino/password-authenticator.properties
+      - ./conf/trino/keystore.p12:/etc/trino/keystore.p12:ro
+      - ./conf/trino/jvm.config:/etc/trino/jvm.config:ro
+    ports:
+      - "8443:8443"
+    networks:
+      - iceberg-net
+
+  airflow-init:
+    build:
+      context: ./docker/airflow
+    env_file: .env
+    depends_on:
+      postgres-bootstrap:
+        condition: service_completed_successfully
+      iceberg-rest:
+        condition: service_started
+      iceberg-alembic:
+        condition: service_healthy
+    environment:
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${AIRFLOW_DB:-airflow}
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+      _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_USER:-admin}
+      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_PASSWORD:-admin}
+      AWS_ACCESS_KEY_ID: ${OCI_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${OCI_SECRET_ACCESS_KEY}
+      AWS_REGION: ${OCI_REGION:-us-east-1}
+      OCI_ACCESS_KEY_ID: ${OCI_ACCESS_KEY_ID}
+      OCI_SECRET_ACCESS_KEY: ${OCI_SECRET_ACCESS_KEY}
+      OCI_REGION: ${OCI_REGION:-uk-london-1}
+      OCI_S3_ENDPOINT: ${OCI_S3_ENDPOINT}
+      USE_OCI_STORAGE: ${USE_OCI_STORAGE:-false}
+      ICEBERG_CATALOG_URI: http://iceberg-rest:8181
+      AIRFLOW_UID: ${AIRFLOW_UID:-50000}
+    user: "${AIRFLOW_UID}:0"
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./jobs:/opt/airflow/jobs
+      - ./data:/opt/airflow/data
+      - ./conf/spark:/opt/airflow/conf/spark
+      - airflow-logs:/opt/airflow/logs
+      - ./scripts/bootstrap_ingestion_prefixes.sh:/bootstrap_ingestion_prefixes.sh:ro
+      - ./scripts:/opt/scripts
+    entrypoint: >
+      /bin/bash -c " airflow db migrate && airflow users create --role Admin --username ${AIRFLOW_USER} --password ${AIRFLOW_PASSWORD} --firstname Local --lastname Admin --email admin@example.com || true &&
+      /opt/scripts/bootstrap_ingestion_prefixes.sh &&
+      /opt/scripts/upload_to_oracle_s3.sh"
+    networks:
+      - iceberg-net
+
+  airflow-webserver:
+    build:
+      context: ./docker/airflow
+    env_file: .env
+    depends_on:
+      - airflow-init
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 6g
+        reservations:
+          cpus: '0.5'
+          memory: 2g
+    environment:
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${AIRFLOW_DB:-airflow}
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+      AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.session,airflow.api.auth.backend.basic_auth"
+      AWS_ACCESS_KEY_ID: ${OCI_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${OCI_SECRET_ACCESS_KEY}
+      AWS_REGION: ${OCI_REGION:-us-east-1}
+      OCI_ACCESS_KEY_ID: ${OCI_ACCESS_KEY_ID}
+      OCI_SECRET_ACCESS_KEY: ${OCI_SECRET_ACCESS_KEY}
+      OCI_REGION: ${OCI_REGION:-uk-london-1}
+      OCI_S3_ENDPOINT: ${OCI_S3_ENDPOINT}
+      USE_OCI_STORAGE: ${USE_OCI_STORAGE:-false}
+      ICEBERG_CATALOG_URI: http://iceberg-rest:8181
+      AIRFLOW_UID: ${AIRFLOW_UID}
+      OAUTH_CLIENT_ID: ${OAUTH_CLIENT_ID}
+      OAUTH_CLIENT_SECRET: ${OAUTH_CLIENT_SECRET}
+      OPENID_PROVIDER_URL: ${OPENID_PROVIDER_URL}
+      AIRFLOW__WEBSERVER__BASE_URL: "${HTTP_SCHEME}://${AIRFLOW}"
+      AIRFLOW__WEBSERVER__ENABLE_PROXY_FIX: "true"
+      AIRFLOW__WEBSERVER__PROXY_FIX_X_FOR: "1"
+      AIRFLOW__WEBSERVER__PROXY_FIX_X_PROTO: "1"
+      AIRFLOW__WEBSERVER__PROXY_FIX_X_HOST: "1"
+      AIRFLOW__WEBSERVER__PROXY_FIX_X_PREFIX: "1"
+      LANDING_BUCKET: ${LANDING_BUCKET:-landing}
+    user: "${AIRFLOW_UID}:0"
+    command: webserver
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./jobs:/opt/airflow/jobs
+      - ./data:/opt/airflow/data
+      - ./conf/spark:/opt/airflow/conf/spark
+      - airflow-logs:/opt/airflow/logs
+      - airflow-dag-configs:/opt/airflow/dag_generated_configs
+      - ./conf/airflow/webserver_config.py:/opt/airflow/webserver_config.py:ro
+    ports:
+      - "8080:8080"
+    networks:
+      - iceberg-net
+
+  airflow-scheduler:
+    build:
+      context: ./docker/airflow
+    env_file: .env
+    depends_on:
+      - airflow-init
+    environment:
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${AIRFLOW_DB}
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+      AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.basic_auth"
+      AWS_ACCESS_KEY_ID: ${OCI_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${OCI_SECRET_ACCESS_KEY}
+      AWS_REGION: ${OCI_REGION:-us-east-1}
+      OCI_ACCESS_KEY_ID: ${OCI_ACCESS_KEY_ID}
+      OCI_SECRET_ACCESS_KEY: ${OCI_SECRET_ACCESS_KEY}
+      OCI_REGION: ${OCI_REGION:-uk-london-1}
+      OCI_S3_ENDPOINT: ${OCI_S3_ENDPOINT}
+      USE_OCI_STORAGE: ${USE_OCI_STORAGE:-false}
+      ICEBERG_CATALOG_URI: http://iceberg-rest:8181
+      AIRFLOW_UID: ${AIRFLOW_UID}
+    user: "${AIRFLOW_UID}:0"
+    command: scheduler
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./jobs:/opt/airflow/jobs
+      - ./data:/opt/airflow/data
+      - ./conf/spark:/opt/airflow/conf/spark
+      - airflow-logs:/opt/airflow/logs
+      - airflow-dag-configs:/opt/airflow/dag_generated_configs
+    networks:
+      - iceberg-net
+
+  superset:
+    build:
+      context: ./docker/superset
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      trino:
+        condition: service_healthy
+      iceberg-alembic:
+        condition: service_healthy
+    environment:
+      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY:-changeme}
+      SUPERSET_DB_URI: "postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${SUPERSET_DB}"
+      SUPERSET_CONFIG_PATH: /app/pythonpath/superset_config.py
+      SUPERSET_TRINO_DB_NAME: ${SUPERSET_TRINO_DB_NAME:-DataWarehouse}
+      SUPERSET_TRINO_DB_URI: ${SUPERSET_TRINO_DB_URI:-trino://admin:admin@trino:8443/iceberg?verify=false}
+      OAUTH_CLIENT_ID: ${OAUTH_CLIENT_ID}
+      OAUTH_CLIENT_SECRET: ${OAUTH_CLIENT_SECRET}
+      OPENID_PROVIDER_URL: ${OPENID_PROVIDER_URL}
+      SUPERSET_PUBLIC_URL: ${HTTP_SCHEME}://${SUPERSET}
+    volumes:
+      - ./conf/superset:/app/pythonpath
+    ports:
+      - "8088:8088"
+    command: >
+      /bin/sh -c " echo 'Waiting for database...' && until superset db upgrade; do echo 'DB upgrade not ready, retrying in 5s...'; sleep 5; done && superset fab create-admin --username $${SUPERSET_ADMIN_USER:-admin} --firstname Superset --lastname Admin --email $${SUPERSET_ADMIN_EMAIL:-admin@example.com} --password $${SUPERSET_ADMIN_PASSWORD:-admin} || true && superset init && python /app/pythonpath/bootstrap_trino_database.py && superset run -p 8088 --with-threads --reload --host 0.0.0.0 "
+    networks:
+      - iceberg-net
+
+  iceberg-rest-proxy:
+    image: nginx:alpine
+    depends_on:
+      - iceberg-rest
+    volumes:
+      - ./conf/nginx/iceberg-cors-proxy.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "8182:8182"
+    networks:
+      - iceberg-net
+
+  swagger-ui:
+    image: swaggerapi/swagger-ui
+    depends_on:
+      - iceberg-rest
+    environment:
+      SWAGGER_JSON: /openapi/iceberg-rest-catalog.yaml
+    volumes:
+      - ./conf/swagger/iceberg-rest-catalog.yaml:/openapi/iceberg-rest-catalog.yaml:ro
+    ports:
+      - "8282:8080"
+    networks:
+      - iceberg-net
+
+  # --- OpenSearch (search backend required by OpenMetadata) ---
+  opensearch:
+    image: opensearchproject/opensearch:2.11.0
+    environment:
+      discovery.type: single-node
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+      DISABLE_SECURITY_PLUGIN: "true"
+      bootstrap.memory_lock: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    ports:
+      - "9200:9200"
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health | grep -q '\"status\":\"green\"\\|\"status\":\"yellow\"'"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+    networks:
+      - iceberg-net
+
+  # --- OpenMetadata Server (governance UI + API) ---
+  openmetadata-server:
+    image: openmetadata/server:1.4.0
+    env_file: .env
+    environment:
+      OPENMETADATA_CLUSTER_NAME: openmetadata
+      LOG_LEVEL: INFO
+      OPENMETADATA_HEAP_OPTS: "-Xmx1G -Xms1G"
+      # PostgreSQL backend
+      DB_DRIVER_CLASS: "org.postgresql.Driver"
+      DB_SCHEME: "postgresql"
+      DB_USE_SSL: "false"
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      OM_DATABASE: openmetadata
+      DB_USER: ${POSTGRES_USER}
+      DB_USER_PASSWORD: ${POSTGRES_PASSWORD}
+      # OpenSearch backend
+      SEARCH_TYPE: "opensearch"
+      ELASTICSEARCH_HOST: opensearch
+      ELASTICSEARCH_PORT: "9200"
+      ELASTICSEARCH_SCHEME: http
+      # SSO via Keycloak OIDC
+      AUTHENTICATION_PROVIDER: "custom-oidc"
+      AUTHENTICATION_RESPONSE_TYPE: "code"
+      AUTHENTICATION_CLIENT_TYPE: "confidential"
+      AUTHENTICATION_AUTHORITY: ${KEYCLOAK_REALM_URL}
+      AUTHENTICATION_CLIENT_ID: ${OAUTH_CLIENT_ID}
+      AUTHENTICATION_CALLBACK_URL: "${HTTP_SCHEME}://${OPENMETADATA}/callback"
+      AUTHENTICATION_PUBLIC_KEYS: "[${KEYCLOAK_REALM_URL}/protocol/openid-connect/certs]"
+      OIDC_CLIENT_ID: ${OAUTH_CLIENT_ID}
+      OIDC_CLIENT_SECRET: ${OAUTH_CLIENT_SECRET}
+      OIDC_DISCOVERY_URI: ${OPENID_PROVIDER_URL}
+      OIDC_RESPONSE_TYPE: "code"
+      OIDC_DISABLE_PKCE: "false"
+      OIDC_CALLBACK: "${HTTP_SCHEME}://${OPENMETADATA}/callback"
+      OIDC_SERVER_URL: "${HTTP_SCHEME}://${OPENMETADATA}"
+      AUTHORIZER_ADMIN_PRINCIPALS: '["*"]'
+      AUTHORIZER_PRINCIPAL_DOMAIN: "${PRINCIPAL_DOMAIN}"
+      AUTHORIZER_ENFORCE_PRINCIPAL_DOMAIN: "false"
+      SERVER_HOST_API_URL: "${HTTP_SCHEME}://${OPENMETADATA}/api"
+      # Airflow pipeline service client (existing Airflow)
+      PIPELINE_SERVICE_CLIENT_ENDPOINT: "${HTTP_SCHEME}://${AIRFLOW}"
+      PIPELINE_SERVICE_CLIENT_VERIFY_SSL: "${PIPELINE_SERVICE_CLIENT_VERIFY_SSL}"
+      PIPELINE_SERVICE_CLIENT_CLASS_NAME: "org.openmetadata.service.clients.pipeline.airflow.AirflowRESTClient"
+      PIPELINE_SERVICE_CLIENT_CREDENTIALS_USERNAME: ${AIRFLOW_USER}
+      PIPELINE_SERVICE_CLIENT_CREDENTIALS_PASSWORD: ${AIRFLOW_PASSWORD}
+      AIRFLOW_TIMEOUT: "10"
+      PIPELINE_SERVICE_IP_INFO_ENABLED: "false"
+    command: ["-c", "./bootstrap/bootstrap_storage.sh migrate-all && /openmetadata-start.sh"]
+    extra_hosts:
+      - "${SSO_HOST}:${SSO_HOST_IP}"
+    ports:
+      - "8585:8585"
+      - "8586:8586"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8586/healthcheck || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 120s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+    volumes:
+      - openmetadata-volume:/opt/openmetadata
+    networks:
+      - iceberg-net
+
+  # --- OpenMetadata Ingestion (CLI connector runner) ---
+  # Uses the official ingestion image (has all connectors pre-installed).
+  # Entrypoint is overridden to sleep so it doesn't start its own Airflow on
+  # port 8080 — we only use it for "docker compose exec ... metadata ingest".
+  openmetadata-ingestion:
+    build:
+      context: ./docker/openmetadata-ingestion
+    env_file: .env
+    entrypoint: ["/bin/bash", "-c", "sleep infinity"]
+    depends_on:
+      - openmetadata-server
+    environment:
+      TRINO_USER: ${TRINO_USER:-admin}
+      TRINO_PASSWORD: ${TRINO_PASSWORD:-}
+      AIRFLOW_USER: ${AIRFLOW_USER}
+      AIRFLOW_PASSWORD: ${AIRFLOW_PASSWORD}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      SUPERSET_ADMIN_USER: ${SUPERSET_ADMIN_USER}
+      SUPERSET_ADMIN_PASSWORD: ${SUPERSET_ADMIN_PASSWORD}
+      OM_INGESTION_JWT: ${OM_INGESTION_JWT:-}
+      AIRFLOW: ${AIRFLOW}
+      SUPERSET: ${SUPERSET}
+      OCI_ACCESS_KEY_ID: ${OCI_ACCESS_KEY_ID}
+      OCI_SECRET_ACCESS_KEY: ${OCI_SECRET_ACCESS_KEY}
+      OCI_REGION: ${OCI_REGION}
+      OCI_S3_ENDPOINT: ${OCI_S3_ENDPOINT}
+      CLICKHOUSE_HOST: ${CLICKHOUSE_HOST}
+      CLICKHOUSE_PORT: ${CLICKHOUSE_PORT:-8123}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      PINOT_BROKER_HOST: ${PINOT_BROKER_HOST}
+      PINOT_BROKER_PORT: ${PINOT_BROKER_PORT:-8099}
+      PINOT_CONTROLLER_HOST: ${PINOT_CONTROLLER_HOST}
+      PINOT_CONTROLLER_PORT: ${PINOT_CONTROLLER_PORT:-9000}
+      OPENMETADATA: ${OPENMETADATA}
+    volumes:
+      - ./conf/openmetadata:/conf
+    networks:
+      - iceberg-net
+
+  ngrok:
+    image: ngrok/ngrok:latest
+    env_file: .env
+    profiles:
+      - ngrok
+    depends_on:
+      airflow-webserver:
+        condition: service_started
+      superset:
+        condition: service_started
+      trino:
+        condition: service_started
+      iceberg-rest:
+        condition: service_started
+      spark:
+        condition: service_started
+      swagger-ui:
+        condition: service_started
+      opensearch:
+        condition: service_started
+      openmetadata-server:
+        condition: service_healthy
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN}
+    volumes:
+      - ./conf/ngrok/ngrok.yml:/etc/ngrok.yml
+    command: start --all --config /etc/ngrok.yml
+    ports:
+      - "4041:4040"   # ngrok dashboard UI
+    networks:
+      - iceberg-net
+
+
+networks:
+  iceberg-net:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  airflow-logs:
+  airflow-dag-configs:
+  opensearch-data:
+  openmetadata-volume:

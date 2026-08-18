@@ -1,0 +1,34 @@
+source:
+  type: trino
+  serviceName: trino-iceberg
+  serviceConnection:
+    config:
+      type: Trino
+      username: ${TRINO_USER}
+      # authType:
+      #   password: ${TRINO_PASSWORD}
+      hostPort: ${TRINO_HOSTPORT:-trino:8080}
+      catalog: iceberg
+  sourceConfig:
+    config:
+      type: DatabaseMetadata
+      markDeletedTables: true
+      includeTables: true
+      includeViews: true
+      schemaFilterPattern:
+        excludes:
+          - information_schema
+          - ^sys$
+          - system
+
+sink:
+  type: metadata-rest
+  config: {}
+
+workflowConfig:
+  loggerLevel: INFO
+  openMetadataServerConfig:
+    hostPort: "${OPENMETADATA}/api"
+    authProvider: openmetadata
+    securityConfig:
+      jwtToken: "${OM_INGESTION_JWT}"

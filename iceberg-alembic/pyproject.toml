@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "iceberg-alembic"
+version = "0.1.0"
+description = "Migration framework for Apache Iceberg tables inspired by Alembic."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "NextGen" }
+]
+dependencies = [
+  "boto3>=1.26,<2",
+  "click>=8.1,<9",
+  "pydantic>=2.7,<3",
+  "pyarrow>=16,<22",
+  "pyiceberg[sql-postgres]>=0.7,<1",
+  "pytest>=8,<9",
+  "rich>=13,<14",
+  "tomli>=2.0; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8,<9",
+]
+
+[project.scripts]
+iceberg-migrate = "iceberg_alembic.cli:cli"
+
+[tool.setuptools]
+package-dir = {"" = "."}
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["iceberg_alembic*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

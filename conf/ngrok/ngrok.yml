@@ -1,0 +1,41 @@
+version: "2"
+tunnels:
+  airflow:
+    proto: http
+    addr: airflow-webserver:8080
+    domain: airflow.ngrok-free.app
+    inspect: false
+  superset:
+    proto: http
+    addr: superset:8088
+    domain: superset.ngrok-free.app
+    inspect: false
+  trino:
+    proto: http
+    addr: trino:8080
+    domain: trino.ngrok-free.app
+    inspect: false
+  iceberg-rest:
+    proto: http
+    addr: iceberg-rest-proxy:8182
+    domain: iceberg.ngrok-free.app
+    inspect: false
+  spark:
+    proto: http
+    addr: spark:4040
+    inspect: false
+  swagger-ui:
+    proto: http
+    addr: swagger-ui:8080
+    domain: swagger.ngrok-free.app
+    inspect: false
+  opensearch:
+    proto: http
+    addr: opensearch:9200
+    domain: opensearch.ngrok-free.app
+    inspect: false
+  openmetadata:
+    proto: http
+    addr: openmetadata-server:8585
+    domain: openmetadata.ngrok-free.app
+    inspect: false

@@ -1,0 +1,32 @@
+source:
+  type: clickhouse
+  serviceName: clickhouse-platform
+  serviceConnection:
+    config:
+      type: Clickhouse
+      username: ${CLICKHOUSE_USER:-default}
+      password: ${CLICKHOUSE_PASSWORD}
+      hostPort: ${CLICKHOUSE_HOST}:${CLICKHOUSE_PORT:-8123}
+      scheme: clickhouse+http
+  sourceConfig:
+    config:
+      type: DatabaseMetadata
+      markDeletedTables: true
+      includeTables: true
+      includeViews: true
+      schemaFilterPattern:
+        excludes:
+          - information_schema
+          - system
+
+sink:
+  type: metadata-rest
+  config: {}
+
+workflowConfig:
+  loggerLevel: INFO
+  openMetadataServerConfig:
+    hostPort: "${OPENMETADATA}/api"
+    authProvider: openmetadata
+    securityConfig:
+      jwtToken: "${OM_INGESTION_JWT}"
