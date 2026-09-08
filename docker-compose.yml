@@ -36,11 +36,57 @@ services:
     networks:
       - iceberg-net
 
+  # --- MinIO (local S3-compatible object storage for dev/test) ---
+  minio:
+    image: minio/minio:latest
+    env_file: .env
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - iceberg-net
+
+  # --- Creates the buckets the platform expects on MinIO (idempotent) ---
+  minio-init:
+    image: minio/mc:latest
+    env_file: .env
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      CATALOG_WAREHOUSE: ${CATALOG_WAREHOUSE:-warehouse}
+      LANDING_BUCKET: ${LANDING_BUCKET:-landing}
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 \"$$MINIO_ROOT_USER\" \"$$MINIO_ROOT_PASSWORD\" &&
+      mc mb --ignore-existing local/\"$$CATALOG_WAREHOUSE\" &&
+      mc mb --ignore-existing local/\"$$LANDING_BUCKET\" &&
+      echo 'MinIO buckets ready'
+      "
+    networks:
+      - iceberg-net
+
   iceberg-rest:
     image: tabulario/iceberg-rest:0.6.0
     env_file: .env
     depends_on:
       postgres-bootstrap:
+        condition: service_completed_successfully
+      minio-init:
         condition: service_completed_successfully
     environment:
       AWS_ACCESS_KEY_ID: ${OCI_ACCESS_KEY_ID}
@@ -132,6 +178,8 @@ services:
         condition: service_started
       iceberg-alembic:
         condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
     environment:
       AWS_ACCESS_KEY_ID: ${OCI_ACCESS_KEY_ID}
       AWS_SECRET_ACCESS_KEY: ${OCI_SECRET_ACCESS_KEY}
@@ -210,6 +258,8 @@ services:
         condition: service_started
       iceberg-alembic:
         condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
     environment:
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${AIRFLOW_DB:-airflow}
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
@@ -387,141 +437,144 @@ services:
       - iceberg-net
 
   # --- OpenSearch (search backend required by OpenMetadata) ---
-  opensearch:
-    image: opensearchproject/opensearch:2.11.0
-    environment:
-      discovery.type: single-node
-      DISABLE_INSTALL_DEMO_CONFIG: "true"
-      DISABLE_SECURITY_PLUGIN: "true"
-      bootstrap.memory_lock: "true"
-      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
-    ulimits:
-      memlock:
-        soft: -1
-        hard: -1
-    ports:
-      - "9200:9200"
-    volumes:
-      - opensearch-data:/usr/share/opensearch/data
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health | grep -q '\"status\":\"green\"\\|\"status\":\"yellow\"'"]
-      interval: 10s
-      timeout: 10s
-      retries: 20
-    networks:
-      - iceberg-net
+  # Commented out along with OpenMetadata (not in use).
+  # opensearch:
+  #   image: opensearchproject/opensearch:2.11.0
+  #   environment:
+  #     discovery.type: single-node
+  #     DISABLE_INSTALL_DEMO_CONFIG: "true"
+  #     DISABLE_SECURITY_PLUGIN: "true"
+  #     bootstrap.memory_lock: "true"
+  #     OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+  #   ulimits:
+  #     memlock:
+  #       soft: -1
+  #       hard: -1
+  #   ports:
+  #     - "9200:9200"
+  #   volumes:
+  #     - opensearch-data:/usr/share/opensearch/data
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health | grep -q '\"status\":\"green\"\\|\"status\":\"yellow\"'"]
+  #     interval: 10s
+  #     timeout: 10s
+  #     retries: 20
+  #   networks:
+  #     - iceberg-net
 
   # --- OpenMetadata Server (governance UI + API) ---
-  openmetadata-server:
-    image: openmetadata/server:1.4.0
-    env_file: .env
-    environment:
-      OPENMETADATA_CLUSTER_NAME: openmetadata
-      LOG_LEVEL: INFO
-      OPENMETADATA_HEAP_OPTS: "-Xmx1G -Xms1G"
-      # PostgreSQL backend
-      DB_DRIVER_CLASS: "org.postgresql.Driver"
-      DB_SCHEME: "postgresql"
-      DB_USE_SSL: "false"
-      DB_HOST: postgres
-      DB_PORT: "5432"
-      OM_DATABASE: openmetadata
-      DB_USER: ${POSTGRES_USER}
-      DB_USER_PASSWORD: ${POSTGRES_PASSWORD}
-      # OpenSearch backend
-      SEARCH_TYPE: "opensearch"
-      ELASTICSEARCH_HOST: opensearch
-      ELASTICSEARCH_PORT: "9200"
-      ELASTICSEARCH_SCHEME: http
-      # SSO via Keycloak OIDC
-      AUTHENTICATION_PROVIDER: "custom-oidc"
-      AUTHENTICATION_RESPONSE_TYPE: "code"
-      AUTHENTICATION_CLIENT_TYPE: "confidential"
-      AUTHENTICATION_AUTHORITY: ${KEYCLOAK_REALM_URL}
-      AUTHENTICATION_CLIENT_ID: ${OAUTH_CLIENT_ID}
-      AUTHENTICATION_CALLBACK_URL: "${HTTP_SCHEME}://${OPENMETADATA}/callback"
-      AUTHENTICATION_PUBLIC_KEYS: "[${KEYCLOAK_REALM_URL}/protocol/openid-connect/certs]"
-      OIDC_CLIENT_ID: ${OAUTH_CLIENT_ID}
-      OIDC_CLIENT_SECRET: ${OAUTH_CLIENT_SECRET}
-      OIDC_DISCOVERY_URI: ${OPENID_PROVIDER_URL}
-      OIDC_RESPONSE_TYPE: "code"
-      OIDC_DISABLE_PKCE: "false"
-      OIDC_CALLBACK: "${HTTP_SCHEME}://${OPENMETADATA}/callback"
-      OIDC_SERVER_URL: "${HTTP_SCHEME}://${OPENMETADATA}"
-      AUTHORIZER_ADMIN_PRINCIPALS: '["*"]'
-      AUTHORIZER_PRINCIPAL_DOMAIN: "${PRINCIPAL_DOMAIN}"
-      AUTHORIZER_ENFORCE_PRINCIPAL_DOMAIN: "false"
-      SERVER_HOST_API_URL: "${HTTP_SCHEME}://${OPENMETADATA}/api"
-      # Airflow pipeline service client (existing Airflow)
-      PIPELINE_SERVICE_CLIENT_ENDPOINT: "${HTTP_SCHEME}://${AIRFLOW}"
-      PIPELINE_SERVICE_CLIENT_VERIFY_SSL: "${PIPELINE_SERVICE_CLIENT_VERIFY_SSL}"
-      PIPELINE_SERVICE_CLIENT_CLASS_NAME: "org.openmetadata.service.clients.pipeline.airflow.AirflowRESTClient"
-      PIPELINE_SERVICE_CLIENT_CREDENTIALS_USERNAME: ${AIRFLOW_USER}
-      PIPELINE_SERVICE_CLIENT_CREDENTIALS_PASSWORD: ${AIRFLOW_PASSWORD}
-      AIRFLOW_TIMEOUT: "10"
-      PIPELINE_SERVICE_IP_INFO_ENABLED: "false"
-    command: ["-c", "./bootstrap/bootstrap_storage.sh migrate-all && /openmetadata-start.sh"]
-    extra_hosts:
-      - "${SSO_HOST}:${SSO_HOST_IP}"
-    ports:
-      - "8585:8585"
-      - "8586:8586"
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8586/healthcheck || exit 1"]
-      interval: 10s
-      timeout: 10s
-      retries: 20
-      start_period: 120s
-    depends_on:
-      postgres:
-        condition: service_healthy
-      opensearch:
-        condition: service_healthy
-    volumes:
-      - openmetadata-volume:/opt/openmetadata
-    networks:
-      - iceberg-net
+  # Commented out (not in use).
+  # openmetadata-server:
+  #   image: openmetadata/server:1.4.0
+  #   env_file: .env
+  #   environment:
+  #     OPENMETADATA_CLUSTER_NAME: openmetadata
+  #     LOG_LEVEL: INFO
+  #     OPENMETADATA_HEAP_OPTS: "-Xmx1G -Xms1G"
+  #     # PostgreSQL backend
+  #     DB_DRIVER_CLASS: "org.postgresql.Driver"
+  #     DB_SCHEME: "postgresql"
+  #     DB_USE_SSL: "false"
+  #     DB_HOST: postgres
+  #     DB_PORT: "5432"
+  #     OM_DATABASE: openmetadata
+  #     DB_USER: ${POSTGRES_USER}
+  #     DB_USER_PASSWORD: ${POSTGRES_PASSWORD}
+  #     # OpenSearch backend
+  #     SEARCH_TYPE: "opensearch"
+  #     ELASTICSEARCH_HOST: opensearch
+  #     ELASTICSEARCH_PORT: "9200"
+  #     ELASTICSEARCH_SCHEME: http
+  #     # SSO via Keycloak OIDC
+  #     AUTHENTICATION_PROVIDER: "custom-oidc"
+  #     AUTHENTICATION_RESPONSE_TYPE: "code"
+  #     AUTHENTICATION_CLIENT_TYPE: "confidential"
+  #     AUTHENTICATION_AUTHORITY: ${KEYCLOAK_REALM_URL}
+  #     AUTHENTICATION_CLIENT_ID: ${OAUTH_CLIENT_ID}
+  #     AUTHENTICATION_CALLBACK_URL: "${HTTP_SCHEME}://${OPENMETADATA}/callback"
+  #     AUTHENTICATION_PUBLIC_KEYS: "[${KEYCLOAK_REALM_URL}/protocol/openid-connect/certs]"
+  #     OIDC_CLIENT_ID: ${OAUTH_CLIENT_ID}
+  #     OIDC_CLIENT_SECRET: ${OAUTH_CLIENT_SECRET}
+  #     OIDC_DISCOVERY_URI: ${OPENID_PROVIDER_URL}
+  #     OIDC_RESPONSE_TYPE: "code"
+  #     OIDC_DISABLE_PKCE: "false"
+  #     OIDC_CALLBACK: "${HTTP_SCHEME}://${OPENMETADATA}/callback"
+  #     OIDC_SERVER_URL: "${HTTP_SCHEME}://${OPENMETADATA}"
+  #     AUTHORIZER_ADMIN_PRINCIPALS: '["*"]'
+  #     AUTHORIZER_PRINCIPAL_DOMAIN: "${PRINCIPAL_DOMAIN}"
+  #     AUTHORIZER_ENFORCE_PRINCIPAL_DOMAIN: "false"
+  #     SERVER_HOST_API_URL: "${HTTP_SCHEME}://${OPENMETADATA}/api"
+  #     # Airflow pipeline service client (existing Airflow)
+  #     PIPELINE_SERVICE_CLIENT_ENDPOINT: "${HTTP_SCHEME}://${AIRFLOW}"
+  #     PIPELINE_SERVICE_CLIENT_VERIFY_SSL: "${PIPELINE_SERVICE_CLIENT_VERIFY_SSL}"
+  #     PIPELINE_SERVICE_CLIENT_CLASS_NAME: "org.openmetadata.service.clients.pipeline.airflow.AirflowRESTClient"
+  #     PIPELINE_SERVICE_CLIENT_CREDENTIALS_USERNAME: ${AIRFLOW_USER}
+  #     PIPELINE_SERVICE_CLIENT_CREDENTIALS_PASSWORD: ${AIRFLOW_PASSWORD}
+  #     AIRFLOW_TIMEOUT: "10"
+  #     PIPELINE_SERVICE_IP_INFO_ENABLED: "false"
+  #   command: ["-c", "./bootstrap/bootstrap_storage.sh migrate-all && /openmetadata-start.sh"]
+  #   extra_hosts:
+  #     - "${SSO_HOST}:${SSO_HOST_IP}"
+  #   ports:
+  #     - "8585:8585"
+  #     - "8586:8586"
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "wget -qO- http://localhost:8586/healthcheck || exit 1"]
+  #     interval: 10s
+  #     timeout: 10s
+  #     retries: 20
+  #     start_period: 120s
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #     opensearch:
+  #       condition: service_healthy
+  #   volumes:
+  #     - openmetadata-volume:/opt/openmetadata
+  #   networks:
+  #     - iceberg-net
 
   # --- OpenMetadata Ingestion (CLI connector runner) ---
   # Uses the official ingestion image (has all connectors pre-installed).
   # Entrypoint is overridden to sleep so it doesn't start its own Airflow on
   # port 8080 — we only use it for "docker compose exec ... metadata ingest".
-  openmetadata-ingestion:
-    build:
-      context: ./docker/openmetadata-ingestion
-    env_file: .env
-    entrypoint: ["/bin/bash", "-c", "sleep infinity"]
-    depends_on:
-      - openmetadata-server
-    environment:
-      TRINO_USER: ${TRINO_USER:-admin}
-      TRINO_PASSWORD: ${TRINO_PASSWORD:-}
-      AIRFLOW_USER: ${AIRFLOW_USER}
-      AIRFLOW_PASSWORD: ${AIRFLOW_PASSWORD}
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      SUPERSET_ADMIN_USER: ${SUPERSET_ADMIN_USER}
-      SUPERSET_ADMIN_PASSWORD: ${SUPERSET_ADMIN_PASSWORD}
-      OM_INGESTION_JWT: ${OM_INGESTION_JWT:-}
-      AIRFLOW: ${AIRFLOW}
-      SUPERSET: ${SUPERSET}
-      OCI_ACCESS_KEY_ID: ${OCI_ACCESS_KEY_ID}
-      OCI_SECRET_ACCESS_KEY: ${OCI_SECRET_ACCESS_KEY}
-      OCI_REGION: ${OCI_REGION}
-      OCI_S3_ENDPOINT: ${OCI_S3_ENDPOINT}
-      CLICKHOUSE_HOST: ${CLICKHOUSE_HOST}
-      CLICKHOUSE_PORT: ${CLICKHOUSE_PORT:-8123}
-      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
-      PINOT_BROKER_HOST: ${PINOT_BROKER_HOST}
-      PINOT_BROKER_PORT: ${PINOT_BROKER_PORT:-8099}
-      PINOT_CONTROLLER_HOST: ${PINOT_CONTROLLER_HOST}
-      PINOT_CONTROLLER_PORT: ${PINOT_CONTROLLER_PORT:-9000}
-      OPENMETADATA: ${OPENMETADATA}
-    volumes:
-      - ./conf/openmetadata:/conf
-    networks:
-      - iceberg-net
+  # Commented out along with OpenMetadata (not in use).
+  # openmetadata-ingestion:
+  #   build:
+  #     context: ./docker/openmetadata-ingestion
+  #   env_file: .env
+  #   entrypoint: ["/bin/bash", "-c", "sleep infinity"]
+  #   depends_on:
+  #     - openmetadata-server
+  #   environment:
+  #     TRINO_USER: ${TRINO_USER:-admin}
+  #     TRINO_PASSWORD: ${TRINO_PASSWORD:-}
+  #     AIRFLOW_USER: ${AIRFLOW_USER}
+  #     AIRFLOW_PASSWORD: ${AIRFLOW_PASSWORD}
+  #     POSTGRES_USER: ${POSTGRES_USER}
+  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+  #     SUPERSET_ADMIN_USER: ${SUPERSET_ADMIN_USER}
+  #     SUPERSET_ADMIN_PASSWORD: ${SUPERSET_ADMIN_PASSWORD}
+  #     OM_INGESTION_JWT: ${OM_INGESTION_JWT:-}
+  #     AIRFLOW: ${AIRFLOW}
+  #     SUPERSET: ${SUPERSET}
+  #     OCI_ACCESS_KEY_ID: ${OCI_ACCESS_KEY_ID}
+  #     OCI_SECRET_ACCESS_KEY: ${OCI_SECRET_ACCESS_KEY}
+  #     OCI_REGION: ${OCI_REGION}
+  #     OCI_S3_ENDPOINT: ${OCI_S3_ENDPOINT}
+  #     CLICKHOUSE_HOST: ${CLICKHOUSE_HOST}
+  #     CLICKHOUSE_PORT: ${CLICKHOUSE_PORT:-8123}
+  #     CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
+  #     CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+  #     PINOT_BROKER_HOST: ${PINOT_BROKER_HOST}
+  #     PINOT_BROKER_PORT: ${PINOT_BROKER_PORT:-8099}
+  #     PINOT_CONTROLLER_HOST: ${PINOT_CONTROLLER_HOST}
+  #     PINOT_CONTROLLER_PORT: ${PINOT_CONTROLLER_PORT:-9000}
+  #     OPENMETADATA: ${OPENMETADATA}
+  #   volumes:
+  #     - ./conf/openmetadata:/conf
+  #   networks:
+  #     - iceberg-net
 
   ngrok:
     image: ngrok/ngrok:latest
@@ -541,10 +594,7 @@ services:
         condition: service_started
       swagger-ui:
         condition: service_started
-      opensearch:
-        condition: service_started
-      openmetadata-server:
-        condition: service_healthy
+      # opensearch and openmetadata-server are commented out above
     environment:
       NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN}
     volumes:
@@ -562,7 +612,8 @@ networks:
 
 volumes:
   postgres-data:
+  minio-data:
   airflow-logs:
   airflow-dag-configs:
-  opensearch-data:
-  openmetadata-volume:
+  # opensearch-data:      # unused while opensearch is commented out
+  # openmetadata-volume:  # unused while openmetadata-server is commented out

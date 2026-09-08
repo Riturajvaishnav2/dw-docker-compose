@@ -29,13 +29,5 @@ tunnels:
     addr: swagger-ui:8080
     domain: swagger.ngrok-free.app
     inspect: false
-  opensearch:
-    proto: http
-    addr: opensearch:9200
-    domain: opensearch.ngrok-free.app
-    inspect: false
-  openmetadata:
-    proto: http
-    addr: openmetadata-server:8585
-    domain: openmetadata.ngrok-free.app
-    inspect: false
+  # opensearch and openmetadata tunnels removed — those services are
+  # commented out in docker-compose.yml
