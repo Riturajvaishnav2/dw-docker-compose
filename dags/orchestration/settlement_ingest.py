@@ -195,7 +195,7 @@ def archive_original_files(**context):
 with DAG(
     dag_id="gold_settlement_ingest",
     start_date=datetime(2024, 1, 1),
-    schedule="*/59 * * * *",  # Run every 5 minutes
+    schedule="*/59 * * * *",  # Run every 59 minutes
     catchup=False,
     max_active_runs=1,
     tags=["iceberg", "settlement", "gold", "tenant"],

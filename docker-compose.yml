@@ -36,6 +36,39 @@ services:
     networks:
       - iceberg-net
 
+  # --- Keycloak (local SSO for trino/superset/airflow-webserver) ---
+  keycloak:
+    image: quay.io/keycloak/keycloak:25.0.6
+    env_file: .env
+    depends_on:
+      postgres-bootstrap:
+        condition: service_completed_successfully
+    environment:
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN:-admin}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/${KEYCLOAK_DB:-keycloak}
+      KC_DB_USERNAME: ${POSTGRES_USER}
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      KC_HOSTNAME: ${SSO_HOST:-sso.local}
+      KC_HOSTNAME_PORT: ${KEYCLOAK_PORT:-8090}
+      KC_HOSTNAME_STRICT: "false"
+      KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+    command: ["start-dev", "--import-realm"]
+    volumes:
+      - ./conf/keycloak:/opt/keycloak/data/import:ro
+    ports:
+      - "${KEYCLOAK_PORT:-8090}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8080"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    networks:
+      - iceberg-net
+
   # --- MinIO (local S3-compatible object storage for dev/test) ---
   minio:
     image: minio/minio:latest
@@ -206,6 +239,8 @@ services:
         condition: service_started
       iceberg-alembic:
         condition: service_healthy
+      keycloak:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/ui/api.html"]
       interval: 10s
@@ -234,7 +269,7 @@ services:
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
       ICEBERG_CATALOG_URI: http://iceberg-rest:8181
     extra_hosts:
-      - "${SSO_HOST}:${SSO_HOST_IP}"
+      - "${SSO_HOST}:host-gateway"
     volumes:
       - ./conf/trino/catalog:/etc/trino/catalog
       - ./conf/trino/config.properties:/etc/trino/config.properties
@@ -298,7 +333,12 @@ services:
       context: ./docker/airflow
     env_file: .env
     depends_on:
-      - airflow-init
+      airflow-init:
+        condition: service_started
+      keycloak:
+        condition: service_healthy
+    extra_hosts:
+      - "${SSO_HOST}:host-gateway"
     deploy:
       resources:
         limits:
@@ -393,6 +433,10 @@ services:
         condition: service_healthy
       iceberg-alembic:
         condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    extra_hosts:
+      - "${SSO_HOST}:host-gateway"
     environment:
       SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY:-changeme}
       SUPERSET_DB_URI: "postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${SUPERSET_DB}"

@@ -50,6 +50,7 @@ def discover_and_check_files(**context):
 
                     if not bronze_dir:
                         continue
+                    
 
                     forecast_dir = None
                     forecast_search_prefix = f"{SOURCE_PREFIX}/{tenant_name_original}/{bronze_dir}/"
